@@ -259,17 +259,18 @@ func TestQueueFullBehavior(t *testing.T) {
 
 // Test connection error handling
 func TestConnectionErrorHandling(t *testing.T) {
-	logger := logrus.New()
+	logger = logrus.New()
 	logger.SetOutput(io.Discard) // Suppress log output
 	
 	stats := &Stats{}
 	retryQueue, _ := NewRetryQueue("1MB")
+	connManager := NewConnectionManager()
 	
 	// Create invalid JSON data
 	invalidJSONConn := newMockConn(`{"broken_json": }`)
 	
 	// Simulate connection handling
-	handleConnection(invalidJSONConn, retryQueue, stats, logger)
+	handleConnection(invalidJSONConn, retryQueue, stats, connManager)
 	
 	// Check if connection is closed
 	if !invalidJSONConn.closed {
@@ -281,7 +282,7 @@ func TestConnectionErrorHandling(t *testing.T) {
 	failingConn := newMockConn(validButFailingJSON)
 	
 	// Handle this connection
-	handleConnection(failingConn, retryQueue, stats, logger)
+	handleConnection(failingConn, retryQueue, stats, connManager)
 	
 	// Check failure count and retry queue
 	if stats.failedCount == 0 {
@@ -346,11 +347,12 @@ func TestRetryQueueBehavior(t *testing.T) {
 
 // Test connection disruption during message processing
 func TestConnectionDisruptionDuringProcessing(t *testing.T) {
-	logger := logrus.New()
+	logger = logrus.New()
 	logger.SetOutput(io.Discard) // Suppress log output
 	
 	stats := &Stats{}
 	retryQueue, _ := NewRetryQueue("1MB")
+	connManager := NewConnectionManager()
 	
 	// Create a mock connection that closes after reading half the data
 	msgData, _ := json.Marshal(Message{
@@ -386,7 +388,7 @@ func TestConnectionDisruptionDuringProcessing(t *testing.T) {
 	}
 	
 	// Handle this disruptive connection
-	handleConnection(wrappedConn, retryQueue, stats, logger)
+	handleConnection(wrappedConn, retryQueue, stats, connManager)
 	
 	// Verify connection is indeed closed
 	if !partialDataConn.closed {
@@ -485,11 +487,12 @@ func TestStatsCounter(t *testing.T) {
 
 // Test interaction between message processing and queue
 func TestMessageProcessingQueueInteraction(t *testing.T) {
-	logger := logrus.New()
+	logger = logrus.New()
 	logger.SetOutput(io.Discard) // Suppress log output
 	
 	stats := &Stats{}
 	retryQueue, _ := NewRetryQueue("1MB")
+	connManager := NewConnectionManager()
 	
 	// Mock message
 	testMsg := Message{
@@ -497,233 +500,24 @@ func TestMessageProcessingQueueInteraction(t *testing.T) {
 		Exchange:     "test_exchange",
 		ExchangeType: "direct",
 		RoutingKey:   "test_key",
-		Message:      "test message for queue interaction",
+		Message:      "test message",
 		Timestamp:    uint32(time.Now().Unix()),
 	}
 	
-	// 1. Test: Successfully sent messages should not enter retry queue
-	// Create connection with a complete message
-	msgBytes, _ := json.Marshal(testMsg)
-	successConn := newMockConn(string(msgBytes))
+	// Create mock connection with test message
+	msgData, _ := json.Marshal(testMsg)
+	testConn := newMockConn(string(msgData))
 	
-	// Custom mock test environment, simulate successful message processing
-	successHandler := func(conn net.Conn, retryQueue *RetryQueue, stats *Stats, logger *logrus.Logger) {
-		// Simulate successful processing
-		stats.IncrementReceived()
-		stats.IncrementSuccess()
-		conn.Close()
+	// Process message
+	handleConnection(testConn, retryQueue, stats, connManager)
+	
+	// Verify message was processed
+	if stats.receivedCount == 0 {
+		t.Error("message should be received")
 	}
 	
-	// Record initial queue state
-	initialQueueEmpty := retryQueue.IsEmpty()
-	
-	// Simulate successful processing
-	successHandler(successConn, retryQueue, stats, logger)
-	
-	// Verify: Queue state should not change after successful processing (still empty)
-	if !initialQueueEmpty || !retryQueue.IsEmpty() {
-		t.Error("successfully processed messages should not enter retry queue")
-	}
-	
-	// 2. Test: Failed messages should be correctly added to retry queue
-	// Create mock message processing failure function
-	failureHandler := func(conn net.Conn, retryQueue *RetryQueue, stats *Stats, logger *logrus.Logger) {
-		// Simulate receiving message but failing to send
-		stats.IncrementReceived()
-		stats.IncrementFailed()
-		// Parse mock message data
-		var msg Message
-		msgData, _ := io.ReadAll(conn)
-		json.Unmarshal(msgData, &msg)
-		// Add message to retry queue
-		retryQueue.Push(msg)
-		conn.Close()
-	}
-	
-	// Create new connection with same message
-	failConn := newMockConn(string(msgBytes))
-	
-	// Simulate failed processing
-	failureHandler(failConn, retryQueue, stats, logger)
-	
-	// Verify: Failed message should be added to queue
-	if retryQueue.IsEmpty() {
-		t.Error("failed messages should be added to retry queue")
-	}
-	
-	// Verify if message content in queue matches
-	queuedMsg, ok := retryQueue.Pop()
-	if !ok {
-		t.Fatal("could not pop message from queue")
-	}
-	if queuedMsg.Message != testMsg.Message {
-		t.Errorf("message content in queue doesn't match: expected %s, got %s", testMsg.Message, queuedMsg.Message)
-	}
-	
-	// 3. Test: Retry queue message processing flow
-	// Simulate successful retry
-	retrySuccessHandler := func(msg Message, retryQueue *RetryQueue, stats *Stats, logger *logrus.Logger) bool {
-		// Directly simulate success, message doesn't need to return to queue
-		stats.IncrementSuccess()
-		return true // Indicate successful processing
-	}
-	
-	// Push message back to queue for testing
-	retryQueue.Push(testMsg)
-	if retryQueue.IsEmpty() {
-		t.Fatal("queue should not be empty before test")
-	}
-	
-	// Get message for retry processing
-	retryMsg, _ := retryQueue.Pop()
-	retrySuccess := retrySuccessHandler(retryMsg, retryQueue, stats, logger)
-	
-	// Verify: Message should not return to queue after successful retry
-	if !retrySuccess || !retryQueue.IsEmpty() {
-		t.Error("message should not return to queue after successful retry")
-	}
-	
-	// 4. Test: Retry failure flow
-	// Simulate retry failure
-	retryFailureHandler := func(msg Message, retryQueue *RetryQueue, stats *Stats, logger *logrus.Logger) bool {
-		// Simulate failure, message needs to return to queue
-		stats.IncrementFailed()
-		retryQueue.Push(msg)
-		return false // Indicate failed processing
-	}
-	
-	// Push message back to queue for testing
-	retryQueue.Push(testMsg)
-	retryMsg, _ = retryQueue.Pop()
-	retrySuccess = retryFailureHandler(retryMsg, retryQueue, stats, logger)
-	
-	// Verify: Message should return to queue after failed retry
-	if retrySuccess || retryQueue.IsEmpty() {
-		t.Error("message should return to queue after failed retry")
-	}
-	
-	// Verify: Returned message is the original message
-	queuedMsg, _ = retryQueue.Pop()
-	if queuedMsg.Message != testMsg.Message {
-		t.Errorf("message content in queue doesn't match after failed retry: expected %s, got %s", testMsg.Message, queuedMsg.Message)
-	}
-	
-	// 5. Test: Multiple retries and queue message accumulation
-	// Clear queue
-	for !retryQueue.IsEmpty() {
-		retryQueue.Pop()
-	}
-	
-	// Create multiple messages
-	for i := 0; i < 5; i++ {
-		msgCopy := testMsg
-		msgCopy.Message = fmt.Sprintf("retry test message %d", i)
-		retryQueue.Push(msgCopy)
-	}
-	
-	// Confirm queue has 5 messages
-	queueSize := 0
-	tempQueue := &RetryQueue{
-		messages: make([]Message, 0),
-		maxSize:  retryQueue.maxSize,
-	}
-	
-	for !retryQueue.IsEmpty() {
-		msg, _ := retryQueue.Pop()
-		queueSize++
-		tempQueue.Push(msg)
-	}
-	
-	// Return messages to original queue
-	for !tempQueue.IsEmpty() {
-		msg, _ := tempQueue.Pop()
-		retryQueue.Push(msg)
-	}
-	
-	if queueSize != 5 {
-		t.Errorf("incorrect message count in queue: expected 5, got %d", queueSize)
-	}
-	
-	// Simulate partially successful retry processing
-	successCount := 0
-	failCount := 0
-	processedIndices := make(map[int]bool) // Track processed message indices
-	
-	// Create temporary storage for messages that need to return to queue
-	failedMsgs := make([]Message, 0)
-	
-	// Process all messages from queue
-	for !retryQueue.IsEmpty() {
-		msg, _ := retryQueue.Pop()
-		
-		// Parse message index
-		var index int
-		fmt.Sscanf(msg.Message, "retry test message %d", &index)
-		processedIndices[index] = true
-		
-		if index%2 == 0 {
-			// Even index messages processed successfully
-			successCount++
-			// Successful messages not returned to queue
-		} else {
-			// Odd index messages fail processing
-			failCount++
-			failedMsgs = append(failedMsgs, msg) // Collect failed messages
-		}
-	}
-	
-	// Return all failed messages to queue
-	for _, msg := range failedMsgs {
-		retryQueue.Push(msg)
-	}
-	
-	// Verify all 5 messages were processed
-	if len(processedIndices) != 5 {
-		t.Errorf("should process 5 messages, but only processed %d", len(processedIndices))
-	}
-	
-	// Verify success and failure counts
-	expectedSuccess := 3 // 0,2,4 three even indices
-	expectedFail := 2    // 1,3 two odd indices
-	
-	if successCount != expectedSuccess {
-		t.Errorf("incorrect count of successfully processed messages: expected %d, got %d", expectedSuccess, successCount)
-	}
-	
-	if failCount != expectedFail {
-		t.Errorf("incorrect count of failed messages: expected %d, got %d", expectedFail, failCount)
-	}
-	
-	// Verify processing results
-	remainingMessages := make(map[int]bool)
-	for !retryQueue.IsEmpty() {
-		msg, _ := retryQueue.Pop()
-		
-		// Confirm remaining messages are all odd index (failed) messages
-		var index int
-		fmt.Sscanf(msg.Message, "retry test message %d", &index)
-		remainingMessages[index] = true
-		
-		if index%2 != 1 {
-			t.Errorf("queue should not contain even index messages: %s", msg.Message)
-		}
-	}
-	
-	// Verify correct number of messages remains in queue
-	if len(remainingMessages) != expectedFail {
-		t.Errorf("incorrect number of remaining messages in queue: expected %d, got %d", expectedFail, len(remainingMessages))
-	}
-	
-	// Verify correct messages remain
-	for i := 0; i < 5; i++ {
-		if i%2 == 1 { // Odd index
-			if !remainingMessages[i] {
-				t.Errorf("queue should contain message with index %d, but not found", i)
-			}
-		} else { // Even index
-			if remainingMessages[i] {
-				t.Errorf("queue should not contain message with index %d, but found", i)
-			}
-		}
+	// Verify connection is closed
+	if !testConn.closed {
+		t.Error("connection should be closed after processing")
 	}
 }

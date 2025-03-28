@@ -21,6 +21,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var logger *logrus.Logger
+
 type Config struct {
 	Server struct {
 		Port int    `yaml:"port"`
@@ -99,8 +101,8 @@ func getMemoryStats() string {
 		m.NumGC)
 }
 
-func initLogger(config *Config) (*logrus.Logger, error) {
-	logger := logrus.New()
+func initLogger(config *Config) error {
+	logger = logrus.New()
 
 	level, err := logrus.ParseLevel(config.Log.Level)
 	if err != nil {
@@ -115,7 +117,7 @@ func initLogger(config *Config) (*logrus.Logger, error) {
 
 	logDir := filepath.Dir(config.Log.FilePath)
 	if err := os.MkdirAll(logDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create log directory: %v", err)
+		return fmt.Errorf("failed to create log directory: %v", err)
 	}
 
 	maxAge := 7 * 24 * time.Hour
@@ -135,13 +137,13 @@ func initLogger(config *Config) (*logrus.Logger, error) {
 		rotatelogs.WithRotationTime(rotationTime),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to configure log rotation: %v", err)
+		return fmt.Errorf("failed to configure log rotation: %v", err)
 	}
 
 	mw := io.MultiWriter(os.Stdout, writer)
 	logger.SetOutput(mw)
 
-	return logger, nil
+	return nil
 }
 
 func parseSize(sizeStr string) (int64, error) {
@@ -254,69 +256,6 @@ func loadConfig() (*Config, error) {
 	return &config, nil
 }
 
-func publishMessage(ch *amqp.Channel, msg Message) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	if err := ch.Confirm(false); err != nil {
-		return fmt.Errorf("failed to enable confirm mode: %v", err)
-	}
-
-	confirms := ch.NotifyPublish(make(chan amqp.Confirmation, 1))
-
-	err := ch.ExchangeDeclare(
-		msg.Exchange,
-		msg.ExchangeType,
-		true,
-		false,
-		false,
-		false,
-		nil,
-	)
-	if err != nil {
-		return fmt.Errorf("error declaring exchange: %v", err)
-	}
-
-	err = ch.PublishWithContext(
-		ctx,
-		msg.Exchange,
-		msg.RoutingKey,
-		false,
-		false,
-		amqp.Publishing{
-			ContentType: "text/plain",
-			Body:        []byte(msg.Message),
-			Timestamp:   time.Unix(int64(msg.Timestamp), 0),
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("error publishing message: %v", err)
-	}
-
-	select {
-	case confirm := <-confirms:
-		if !confirm.Ack {
-			return fmt.Errorf("message not acknowledged by server")
-		}
-
-		return nil
-	case <-time.After(5 * time.Second):
-		return fmt.Errorf("confirmation timeout exceeded")
-	}
-}
-
-func statsWorker(logger *logrus.Logger, stats *Stats) {
-	ticker := time.NewTicker(20 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		received, success, failed := stats.GetStats()
-		stats.Reset()
-		logger.Infof("Statistics - Within 20 seconds: Received messages: %d, Successfully sent: %d, Failed: %d, Memory usage: %s",
-			received, success, failed, getMemoryStats())
-	}
-}
-
 type AMQPConnection struct {
 	conn *amqp.Connection
 	ch   *amqp.Channel
@@ -334,7 +273,7 @@ func NewConnectionManager() *ConnectionManager {
 	}
 }
 
-func (cm *ConnectionManager) GetConnection(url string) (*amqp.Channel, error) {
+func (cm *ConnectionManager) GetConnection(url string, msg Message) (*amqp.Channel, error) {
 	cm.mu.RLock()
 	amqpConn, exists := cm.connections[url]
 	cm.mu.RUnlock()
@@ -350,13 +289,31 @@ func (cm *ConnectionManager) GetConnection(url string) (*amqp.Channel, error) {
 			ch, err := amqpConn.conn.Channel()
 			if err != nil {
 				amqpConn.mu.Unlock()
+				cm.CloseConnection(url)
 				return nil, err
 			}
 			amqpConn.ch = ch
 			amqpConn.mu.Unlock()
+
+			logger.Debugf("Declaring exchange: %s of type: %s", msg.Exchange, msg.ExchangeType)
+			err = ch.ExchangeDeclare(
+				msg.Exchange,
+				msg.ExchangeType,
+				true,
+				false,
+				false,
+				false,
+				nil,
+			)
+			if err != nil {
+				logger.Errorf("Error declaring exchange: %v", err)
+				return nil, fmt.Errorf("error declaring exchange: %v", err)
+			}
+
 			return ch, nil
 		}
 		amqpConn.mu.Unlock()
+		cm.CloseConnection(url)
 	}
 
 	conn, err := amqp.Dial(url)
@@ -379,6 +336,21 @@ func (cm *ConnectionManager) GetConnection(url string) (*amqp.Channel, error) {
 	cm.connections[url] = amqpConn
 	cm.mu.Unlock()
 
+	logger.Debugf("Declaring exchange: %s of type: %s", msg.Exchange, msg.ExchangeType)
+	err = ch.ExchangeDeclare(
+		msg.Exchange,
+		msg.ExchangeType,
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+	if err != nil {
+		logger.Errorf("Error declaring exchange: %v", err)
+		return nil, fmt.Errorf("error declaring exchange: %v", err)
+	}
+
 	return ch, nil
 }
 
@@ -399,7 +371,69 @@ func (cm *ConnectionManager) CloseConnection(url string) {
 	}
 }
 
-func handleConnection(conn net.Conn, retryQueue *RetryQueue, stats *Stats, logger *logrus.Logger, connManager *ConnectionManager) {
+func publishMessage(ch *amqp.Channel, msg Message) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger.Debugf("Enabling confirm mode for channel...")
+	if err := ch.Confirm(false); err != nil {
+		logger.Errorf("Failed to enable confirm mode: %v", err)
+		return fmt.Errorf("failed to enable confirm mode: %v", err)
+	}
+
+	logger.Debugf("Setting up confirm and error channels...")
+	confirms := ch.NotifyPublish(make(chan amqp.Confirmation, 1))
+	errors := ch.NotifyClose(make(chan *amqp.Error, 1))
+
+	logger.Debugf("Publishing message to exchange: %s with routing key: %s", msg.Exchange, msg.RoutingKey)
+	err := ch.PublishWithContext(
+		ctx,
+		msg.Exchange,
+		msg.RoutingKey,
+		false,
+		false,
+		amqp.Publishing{
+			ContentType: "text/plain",
+			Body:        []byte(msg.Message),
+			Timestamp:   time.Unix(int64(msg.Timestamp), 0),
+		},
+	)
+	if err != nil {
+		logger.Errorf("Error publishing message: %v", err)
+		return fmt.Errorf("error publishing message: %v", err)
+	}
+
+	logger.Debugf("Waiting for confirmation or error...")
+	select {
+	case confirm := <-confirms:
+		if !confirm.Ack {
+			logger.Errorf("Message not acknowledged by server")
+			return fmt.Errorf("message not acknowledged by server")
+		}
+		logger.Debugf("Message acknowledged by server")
+		return nil
+	case err := <-errors:
+		logger.Errorf("Channel closed: %v", err)
+		return fmt.Errorf("channel closed: %v", err)
+	case <-ctx.Done():
+		logger.Errorf("Confirmation timeout exceeded")
+		return fmt.Errorf("confirmation timeout exceeded")
+	}
+}
+
+func statsWorker(stats *Stats) {
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		received, success, failed := stats.GetStats()
+		stats.Reset()
+		logger.Infof("Statistics - Within 20 seconds: Received messages: %d, Successfully sent: %d, Failed: %d, Memory usage: %s",
+			received, success, failed, getMemoryStats())
+	}
+}
+
+func handleConnection(conn net.Conn, retryQueue *RetryQueue, stats *Stats, connManager *ConnectionManager) {
 	defer conn.Close()
 
 	decoder := jstream.NewDecoder(conn, 0)
@@ -417,16 +451,19 @@ func handleConnection(conn net.Conn, retryQueue *RetryQueue, stats *Stats, logge
 			continue
 		}
 
+		logger.Debugf("Received message: %+v", msg)
+
 		stats.IncrementReceived()
 
-		ch, err := connManager.GetConnection(msg.URL)
+		go func(msg Message) {
+		ch, err := connManager.GetConnection(msg.URL, msg)
 		if err != nil {
 			logger.Errorf("error getting AMQP channel: %v", err)
 			if err := retryQueue.Push(msg); err != nil {
 				logger.Errorf("failed to add message to retry queue: %v", err)
 			}
 			stats.IncrementFailed()
-			continue
+			return
 		}
 
 		if err := publishMessage(ch, msg); err != nil {
@@ -435,14 +472,16 @@ func handleConnection(conn net.Conn, retryQueue *RetryQueue, stats *Stats, logge
 				logger.Errorf("failed to add message to retry queue: %v", err)
 			}
 			stats.IncrementFailed()
+			connManager.CloseConnection(msg.URL)
 		} else {
-			logger.Debugf("message sent and acknowledged: %s", msg.Message)
-			stats.IncrementSuccess()
-		}
+				logger.Debugf("message sent and acknowledged: %s", msg.Message)
+				stats.IncrementSuccess()
+			}
+		}(msg)
 	}
 }
 
-func retryWorker(retryQueue *RetryQueue, stats *Stats, logger *logrus.Logger) {
+func retryWorker(retryQueue *RetryQueue, stats *Stats, connManager *ConnectionManager) {
 	for {
 		if retryQueue.IsEmpty() {
 			time.Sleep(time.Second)
@@ -454,19 +493,9 @@ func retryWorker(retryQueue *RetryQueue, stats *Stats, logger *logrus.Logger) {
 			continue
 		}
 
-		amqpConn, err := amqp.Dial(msg.URL)
+		ch, err := connManager.GetConnection(msg.URL, msg)
 		if err != nil {
 			logger.Errorf("error retrying connection to RabbitMQ: %v", err)
-			retryQueue.Push(msg)
-			stats.IncrementFailed()
-			time.Sleep(time.Second * 5)
-			continue
-		}
-
-		ch, err := amqpConn.Channel()
-		if err != nil {
-			amqpConn.Close()
-			logger.Errorf("error retrying channel creation: %v", err)
 			retryQueue.Push(msg)
 			stats.IncrementFailed()
 			time.Sleep(time.Second * 5)
@@ -477,14 +506,12 @@ func retryWorker(retryQueue *RetryQueue, stats *Stats, logger *logrus.Logger) {
 			logger.Errorf("error retrying message publishing: %v", err)
 			retryQueue.Push(msg)
 			stats.IncrementFailed()
+			connManager.CloseConnection(msg.URL)
 		} else {
-
 			logger.Debugf("retry message sent and acknowledged: %s", msg.Message)
 			stats.IncrementSuccess()
 		}
 
-		ch.Close()
-		amqpConn.Close()
 		time.Sleep(time.Second)
 	}
 }
@@ -496,8 +523,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger, err := initLogger(config)
-	if err != nil {
+	if err := initLogger(config); err != nil {
 		fmt.Printf("Error initializing logger: %v\n", err)
 		os.Exit(1)
 	}
@@ -511,8 +537,8 @@ func main() {
 
 	connManager := NewConnectionManager()
 	stats := &Stats{}
-	go statsWorker(logger, stats)
-	go retryWorker(retryQueue, stats, logger)
+	go statsWorker(stats)
+	go retryWorker(retryQueue, stats, connManager)
 
 	addr := fmt.Sprintf("%s:%d", config.Server.Host, config.Server.Port)
 	listener, err := net.Listen("tcp", addr)
@@ -529,6 +555,6 @@ func main() {
 			logger.Errorf("Error accepting connection: %v", err)
 			continue
 		}
-		go handleConnection(conn, retryQueue, stats, logger, connManager)
+		go handleConnection(conn, retryQueue, stats, connManager)
 	}
 }
