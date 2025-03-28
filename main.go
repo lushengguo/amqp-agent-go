@@ -317,7 +317,89 @@ func statsWorker(logger *logrus.Logger, stats *Stats) {
 	}
 }
 
-func handleConnection(conn net.Conn, retryQueue *RetryQueue, stats *Stats, logger *logrus.Logger) {
+type AMQPConnection struct {
+	conn *amqp.Connection
+	ch   *amqp.Channel
+	mu   sync.Mutex
+}
+
+type ConnectionManager struct {
+	connections map[string]*AMQPConnection
+	mu          sync.RWMutex
+}
+
+func NewConnectionManager() *ConnectionManager {
+	return &ConnectionManager{
+		connections: make(map[string]*AMQPConnection),
+	}
+}
+
+func (cm *ConnectionManager) GetConnection(url string) (*amqp.Channel, error) {
+	cm.mu.RLock()
+	amqpConn, exists := cm.connections[url]
+	cm.mu.RUnlock()
+
+	if exists {
+		amqpConn.mu.Lock()
+		if amqpConn.conn != nil && !amqpConn.conn.IsClosed() {
+			if amqpConn.ch != nil && !amqpConn.ch.IsClosed() {
+				ch := amqpConn.ch
+				amqpConn.mu.Unlock()
+				return ch, nil
+			}
+			ch, err := amqpConn.conn.Channel()
+			if err != nil {
+				amqpConn.mu.Unlock()
+				return nil, err
+			}
+			amqpConn.ch = ch
+			amqpConn.mu.Unlock()
+			return ch, nil
+		}
+		amqpConn.mu.Unlock()
+	}
+
+	conn, err := amqp.Dial(url)
+	if err != nil {
+		return nil, err
+	}
+
+	ch, err := conn.Channel()
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	amqpConn = &AMQPConnection{
+		conn: conn,
+		ch:   ch,
+	}
+
+	cm.mu.Lock()
+	cm.connections[url] = amqpConn
+	cm.mu.Unlock()
+
+	return ch, nil
+}
+
+func (cm *ConnectionManager) CloseConnection(url string) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	if amqpConn, exists := cm.connections[url]; exists {
+		amqpConn.mu.Lock()
+		if amqpConn.ch != nil {
+			amqpConn.ch.Close()
+		}
+		if amqpConn.conn != nil {
+			amqpConn.conn.Close()
+		}
+		amqpConn.mu.Unlock()
+		delete(cm.connections, url)
+	}
+}
+
+func handleConnection(conn net.Conn, retryQueue *RetryQueue, stats *Stats, logger *logrus.Logger, connManager *ConnectionManager) {
 	defer conn.Close()
 
 	decoder := jstream.NewDecoder(conn, 0)
@@ -337,27 +419,15 @@ func handleConnection(conn net.Conn, retryQueue *RetryQueue, stats *Stats, logge
 
 		stats.IncrementReceived()
 
-		amqpConn, err := amqp.Dial(msg.URL)
+		ch, err := connManager.GetConnection(msg.URL)
 		if err != nil {
-			logger.Errorf("error connecting to RabbitMQ: %v", err)
-			if err := retryQueue.Push(msg); err != nil {
-                logger.Errorf("failed to add message to retry queue: %v", err)
-			}
-			stats.IncrementFailed()
-			continue
-		}
-        defer amqpConn.Close()
-
-		ch, err := amqpConn.Channel()
-		if err != nil {
-			logger.Errorf("error creating channel: %v", err)
+			logger.Errorf("error getting AMQP channel: %v", err)
 			if err := retryQueue.Push(msg); err != nil {
 				logger.Errorf("failed to add message to retry queue: %v", err)
 			}
 			stats.IncrementFailed()
 			continue
 		}
-		defer ch.Close()
 
 		if err := publishMessage(ch, msg); err != nil {
 			logger.Errorf("error publishing message: %v", err)
@@ -439,6 +509,7 @@ func main() {
 		logger.Fatalf("Error creating retry queue: %v", err)
 	}
 
+	connManager := NewConnectionManager()
 	stats := &Stats{}
 	go statsWorker(logger, stats)
 	go retryWorker(retryQueue, stats, logger)
@@ -458,6 +529,6 @@ func main() {
 			logger.Errorf("Error accepting connection: %v", err)
 			continue
 		}
-		go handleConnection(conn, retryQueue, stats, logger)
+		go handleConnection(conn, retryQueue, stats, logger, connManager)
 	}
 }
