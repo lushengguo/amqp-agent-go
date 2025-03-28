@@ -228,7 +228,7 @@ func (q *RetryQueue) IsEmpty() bool {
 }
 
 func loadConfig() (*Config, error) {
-	data, err := os.ReadFile("config.yaml")
+	data, err := os.ReadFile("config/amqp-agent.yaml")
 	if err != nil {
 		return nil, fmt.Errorf("error reading configuration file: %v", err)
 	}
