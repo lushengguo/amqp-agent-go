@@ -1,0 +1,5 @@
+server:
+  port: 8080
+  host: "0.0.0.0"
+queue:
+  max_size: "1MB"  # 支持 1KB, 1MB, 1GB 
