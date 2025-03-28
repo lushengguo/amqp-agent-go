@@ -1,5 +1,11 @@
 server:
   port: 8080
-  host: "0.0.0.0"
+  host: "127.0.0.1"
 queue:
-  max_size: "1MB"  # 支持 1KB, 1MB, 1GB 
+  max_size: "100MB"
+log:
+  # 日志级别: debug, info, warn, error
+  level: "debug"
+  file_path: "logs/amqp-agent.log"
+  max_age: 7        # 日志保留天数
+  rotation_time: 24 # 日志轮转时间(小时)

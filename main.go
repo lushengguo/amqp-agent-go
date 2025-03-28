@@ -4,16 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/bcicen/jstream"
+	rotatelogs "github.com/lestrrat-go/file-rotatelogs"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
 
@@ -25,6 +29,12 @@ type Config struct {
 	Queue struct {
 		MaxSize string `yaml:"max_size"`
 	} `yaml:"queue"`
+	Log struct {
+		Level        string `yaml:"level"`
+		FilePath     string `yaml:"file_path"`
+		MaxAge       int    `yaml:"max_age"`
+		RotationTime int    `yaml:"rotation_time"`
+	} `yaml:"log"`
 }
 
 type Message struct {
@@ -75,9 +85,9 @@ func (s *Stats) Reset() {
 func (s *Stats) GetStats() (uint64, uint64, uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.receivedCount - s.lastReceivedCount, 
-	       s.successCount - s.lastSuccessCount,
-	       s.failedCount - s.lastFailedCount
+	return s.receivedCount - s.lastReceivedCount,
+		s.successCount - s.lastSuccessCount,
+		s.failedCount - s.lastFailedCount
 }
 
 func getMemoryStats() string {
@@ -89,16 +99,49 @@ func getMemoryStats() string {
 		m.NumGC)
 }
 
-func statsWorker(stats *Stats) {
-	ticker := time.NewTicker(20 * time.Second)
-	defer ticker.Stop()
+func initLogger(config *Config) (*logrus.Logger, error) {
+	logger := logrus.New()
 
-	for range ticker.C {
-		received, success, failed := stats.GetStats()
-		stats.Reset()
-		log.Printf("Statistics - Within 20 seconds: Received messages: %d, Successfully sent: %d, Failed: %d, Memory usage: %s",
-			received, success, failed, getMemoryStats())
+	level, err := logrus.ParseLevel(config.Log.Level)
+	if err != nil {
+		level = logrus.InfoLevel
 	}
+	logger.SetLevel(level)
+
+	logger.SetFormatter(&logrus.TextFormatter{
+		FullTimestamp:   true,
+		TimestampFormat: "2006-01-02 15:04:05",
+	})
+
+	logDir := filepath.Dir(config.Log.FilePath)
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return nil, fmt.Errorf("创建日志目录失败: %v", err)
+	}
+
+	maxAge := 7 * 24 * time.Hour
+	rotationTime := 24 * time.Hour
+
+	if config.Log.MaxAge > 0 {
+		maxAge = time.Duration(config.Log.MaxAge) * 24 * time.Hour
+	}
+
+	if config.Log.RotationTime > 0 {
+		rotationTime = time.Duration(config.Log.RotationTime) * time.Hour
+	}
+
+	writer, err := rotatelogs.New(
+		config.Log.FilePath+".%Y%m%d",
+		rotatelogs.WithMaxAge(maxAge),
+		rotatelogs.WithRotationTime(rotationTime),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("配置日志轮转失败: %v", err)
+	}
+
+	mw := io.MultiWriter(os.Stdout, writer)
+	logger.SetOutput(mw)
+
+	return logger, nil
 }
 
 func parseSize(sizeStr string) (int64, error) {
@@ -195,6 +238,19 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("error parsing configuration file: %v", err)
 	}
 
+	if config.Log.Level == "" {
+		config.Log.Level = "info"
+	}
+	if config.Log.FilePath == "" {
+		config.Log.FilePath = "logs/amqp-agent.log"
+	}
+	if config.Log.MaxAge == 0 {
+		config.Log.MaxAge = 7
+	}
+	if config.Log.RotationTime == 0 {
+		config.Log.RotationTime = 24
+	}
+
 	return &config, nil
 }
 
@@ -202,12 +258,10 @@ func publishMessage(ch *amqp.Channel, msg Message) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Enable confirm mode
 	if err := ch.Confirm(false); err != nil {
 		return fmt.Errorf("failed to enable confirm mode: %v", err)
 	}
 
-	// Create confirm channel to receive publish confirmations
 	confirms := ch.NotifyPublish(make(chan amqp.Confirmation, 1))
 
 	err := ch.ExchangeDeclare(
@@ -239,33 +293,46 @@ func publishMessage(ch *amqp.Channel, msg Message) error {
 		return fmt.Errorf("error publishing message: %v", err)
 	}
 
-	// Wait for confirmation with timeout
 	select {
 	case confirm := <-confirms:
 		if !confirm.Ack {
 			return fmt.Errorf("message not acknowledged by server")
 		}
-		// Message was successfully confirmed
+
 		return nil
 	case <-time.After(5 * time.Second):
 		return fmt.Errorf("confirmation timeout exceeded")
 	}
 }
 
-func handleConnection(conn net.Conn, retryQueue *RetryQueue, stats *Stats) {
+func statsWorker(logger *logrus.Logger, stats *Stats) {
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		received, success, failed := stats.GetStats()
+		stats.Reset()
+		logger.Infof("Statistics - Within 20 seconds: Received messages: %d, Successfully sent: %d, Failed: %d, Memory usage: %s",
+			received, success, failed, getMemoryStats())
+	}
+}
+
+func handleConnection(conn net.Conn, retryQueue *RetryQueue, stats *Stats, logger *logrus.Logger) {
 	defer conn.Close()
 
-	buffer := make([]byte, 4096)
-	for {
-		n, err := conn.Read(buffer)
+	decoder := jstream.NewDecoder(conn, 0)
+
+	for streamObj := range decoder.Stream() {
+
+		jsonData, err := json.Marshal(streamObj.Value)
 		if err != nil {
-			log.Printf("error reading data: %v", err)
-			return
+			logger.Errorf("error re-marshaling JSON: %v", err)
+			continue
 		}
 
 		var msg Message
-		if err := json.Unmarshal(buffer[:n], &msg); err != nil {
-			log.Printf("error parsing JSON: %v", err)
+		if err := json.Unmarshal(jsonData, &msg); err != nil {
+			logger.Errorf("error parsing JSON: %v, data: %s", err, string(jsonData))
 			continue
 		}
 
@@ -273,9 +340,9 @@ func handleConnection(conn net.Conn, retryQueue *RetryQueue, stats *Stats) {
 
 		amqpConn, err := amqp.Dial(msg.URL)
 		if err != nil {
-			log.Printf("error connecting to RabbitMQ: %v", err)
+			logger.Errorf("error connecting to RabbitMQ: %v", err)
 			if err := retryQueue.Push(msg); err != nil {
-				log.Printf("failed to add message to retry queue: %v", err)
+				logger.Errorf("failed to add message to retry queue: %v", err)
 			}
 			stats.IncrementFailed()
 			continue
@@ -284,22 +351,23 @@ func handleConnection(conn net.Conn, retryQueue *RetryQueue, stats *Stats) {
 		ch, err := amqpConn.Channel()
 		if err != nil {
 			amqpConn.Close()
-			log.Printf("error creating channel: %v", err)
+			logger.Errorf("error creating channel: %v", err)
 			if err := retryQueue.Push(msg); err != nil {
-				log.Printf("failed to add message to retry queue: %v", err)
+				logger.Errorf("failed to add message to retry queue: %v", err)
 			}
 			stats.IncrementFailed()
 			continue
 		}
 
 		if err := publishMessage(ch, msg); err != nil {
-			log.Printf("error publishing message: %v", err)
+			logger.Errorf("error publishing message: %v", err)
 			if err := retryQueue.Push(msg); err != nil {
-				log.Printf("failed to add message to retry queue: %v", err)
+				logger.Errorf("failed to add message to retry queue: %v", err)
 			}
 			stats.IncrementFailed()
 		} else {
-			log.Printf("message sent and acknowledged: %s", msg.Message)
+
+			logger.Debugf("message sent and acknowledged: %s", msg.Message)
 			stats.IncrementSuccess()
 		}
 
@@ -308,7 +376,7 @@ func handleConnection(conn net.Conn, retryQueue *RetryQueue, stats *Stats) {
 	}
 }
 
-func retryWorker(retryQueue *RetryQueue, stats *Stats) {
+func retryWorker(retryQueue *RetryQueue, stats *Stats, logger *logrus.Logger) {
 	for {
 		if retryQueue.IsEmpty() {
 			time.Sleep(time.Second)
@@ -322,7 +390,7 @@ func retryWorker(retryQueue *RetryQueue, stats *Stats) {
 
 		amqpConn, err := amqp.Dial(msg.URL)
 		if err != nil {
-			log.Printf("error retrying connection to RabbitMQ: %v", err)
+			logger.Errorf("error retrying connection to RabbitMQ: %v", err)
 			retryQueue.Push(msg)
 			stats.IncrementFailed()
 			time.Sleep(time.Second * 5)
@@ -332,7 +400,7 @@ func retryWorker(retryQueue *RetryQueue, stats *Stats) {
 		ch, err := amqpConn.Channel()
 		if err != nil {
 			amqpConn.Close()
-			log.Printf("error retrying channel creation: %v", err)
+			logger.Errorf("error retrying channel creation: %v", err)
 			retryQueue.Push(msg)
 			stats.IncrementFailed()
 			time.Sleep(time.Second * 5)
@@ -340,11 +408,12 @@ func retryWorker(retryQueue *RetryQueue, stats *Stats) {
 		}
 
 		if err := publishMessage(ch, msg); err != nil {
-			log.Printf("error retrying message publishing: %v", err)
+			logger.Errorf("error retrying message publishing: %v", err)
 			retryQueue.Push(msg)
 			stats.IncrementFailed()
 		} else {
-			log.Printf("retry message sent and acknowledged: %s", msg.Message)
+
+			logger.Debugf("retry message sent and acknowledged: %s", msg.Message)
 			stats.IncrementSuccess()
 		}
 
@@ -357,33 +426,42 @@ func retryWorker(retryQueue *RetryQueue, stats *Stats) {
 func main() {
 	config, err := loadConfig()
 	if err != nil {
-		log.Fatalf("error loading configuration: %v", err)
+		fmt.Printf("Error loading configuration: %v\n", err)
+		os.Exit(1)
 	}
+
+	logger, err := initLogger(config)
+	if err != nil {
+		fmt.Printf("Error initializing logger: %v\n", err)
+		os.Exit(1)
+	}
+
+	logger.Info("Starting AMQP Agent")
 
 	retryQueue, err := NewRetryQueue(config.Queue.MaxSize)
 	if err != nil {
-		log.Fatalf("error creating retry queue: %v", err)
+		logger.Fatalf("Error creating retry queue: %v", err)
 	}
 
 	stats := &Stats{}
-	go statsWorker(stats)
-	go retryWorker(retryQueue, stats)
+	go statsWorker(logger, stats)
+	go retryWorker(retryQueue, stats, logger)
 
 	addr := fmt.Sprintf("%s:%d", config.Server.Host, config.Server.Port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
-		log.Fatalf("error starting server: %v", err)
+		logger.Fatalf("Error starting server: %v", err)
 	}
 	defer listener.Close()
 
-	log.Printf("server started at %s", addr)
+	logger.Infof("Server started at %s", addr)
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			log.Printf("error accepting connection: %v", err)
+			logger.Errorf("Error accepting connection: %v", err)
 			continue
 		}
-		go handleConnection(conn, retryQueue, stats)
+		go handleConnection(conn, retryQueue, stats, logger)
 	}
 }
