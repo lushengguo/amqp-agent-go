@@ -257,9 +257,10 @@ func loadConfig() (*Config, error) {
 }
 
 type AMQPConnection struct {
-	conn *amqp.Connection
-	ch   *amqp.Channel
-	mu   sync.Mutex
+	conn    *amqp.Connection
+	ch      *amqp.Channel
+	mu      sync.Mutex
+	confirms chan amqp.Confirmation  // 用于接收发布确认的通道
 }
 
 type ConnectionManager struct {
@@ -291,7 +292,17 @@ func (cm *ConnectionManager) GetConnection(url string, msg Message) (*amqp.Chann
 				amqpConn.mu.Unlock()
 				cm.CloseConnection(url)
 				return nil, err
+				}
+			
+			// 启用发布确认模式
+			if err := ch.Confirm(false); err != nil {
+				amqpConn.mu.Unlock()
+				logger.Errorf("Failed to enable confirm mode: %v", err)
+				return nil, fmt.Errorf("failed to enable confirm mode: %v", err)
 			}
+			
+			// 设置确认通道
+			amqpConn.confirms = ch.NotifyPublish(make(chan amqp.Confirmation, 100))
 			amqpConn.ch = ch
 			amqpConn.mu.Unlock()
 
@@ -327,9 +338,21 @@ func (cm *ConnectionManager) GetConnection(url string, msg Message) (*amqp.Chann
 		return nil, err
 	}
 
+	// 启用发布确认模式
+	if err := ch.Confirm(false); err != nil {
+		ch.Close()
+		conn.Close()
+		logger.Errorf("Failed to enable confirm mode: %v", err)
+		return nil, fmt.Errorf("failed to enable confirm mode: %v", err)
+	}
+
+	// 创建确认通道
+	confirms := ch.NotifyPublish(make(chan amqp.Confirmation, 100))
+	
 	amqpConn = &AMQPConnection{
 		conn: conn,
 		ch:   ch,
+		confirms: confirms,
 	}
 
 	cm.mu.Lock()
@@ -375,18 +398,10 @@ func publishMessage(ch *amqp.Channel, msg Message) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	logger.Debugf("Enabling confirm mode for channel...")
-	if err := ch.Confirm(false); err != nil {
-		logger.Errorf("Failed to enable confirm mode: %v", err)
-		return fmt.Errorf("failed to enable confirm mode: %v", err)
-	}
-
-	logger.Debugf("Setting up confirm and error channels...")
-	confirms := ch.NotifyPublish(make(chan amqp.Confirmation, 1))
-	errors := ch.NotifyClose(make(chan *amqp.Error, 1))
-
 	logger.Debugf("Publishing message to exchange: %s with routing key: %s", msg.Exchange, msg.RoutingKey)
-	err := ch.PublishWithContext(
+	
+	// 使用PublishWithDeferredConfirm来获取延迟确认
+	confirmation, err := ch.PublishWithDeferredConfirmWithContext(
 		ctx,
 		msg.Exchange,
 		msg.RoutingKey,
@@ -398,23 +413,21 @@ func publishMessage(ch *amqp.Channel, msg Message) error {
 			Timestamp:   time.Unix(int64(msg.Timestamp), 0),
 		},
 	)
+	
 	if err != nil {
 		logger.Errorf("Error publishing message: %v", err)
 		return fmt.Errorf("error publishing message: %v", err)
 	}
 
-	logger.Debugf("Waiting for confirmation or error...")
+	// 设置超时上下文等待确认完成
 	select {
-	case confirm := <-confirms:
-		if !confirm.Ack {
-			logger.Errorf("Message not acknowledged by server")
+	case <-confirmation.Done():
+		if confirmation.Acked() {
+			return nil
+		} else {
+			logger.Errorf("Message not acknowledged by server with tag: %d", confirmation.DeliveryTag)
 			return fmt.Errorf("message not acknowledged by server")
 		}
-		logger.Debugf("Message acknowledged by server")
-		return nil
-	case err := <-errors:
-		logger.Errorf("Channel closed: %v", err)
-		return fmt.Errorf("channel closed: %v", err)
 	case <-ctx.Done():
 		logger.Errorf("Confirmation timeout exceeded")
 		return fmt.Errorf("confirmation timeout exceeded")
@@ -456,24 +469,24 @@ func handleConnection(conn net.Conn, retryQueue *RetryQueue, stats *Stats, connM
 		stats.IncrementReceived()
 
 		go func(msg Message) {
-		ch, err := connManager.GetConnection(msg.URL, msg)
-		if err != nil {
-			logger.Errorf("error getting AMQP channel: %v", err)
-			if err := retryQueue.Push(msg); err != nil {
-				logger.Errorf("failed to add message to retry queue: %v", err)
+			ch, err := connManager.GetConnection(msg.URL, msg)
+			if err != nil {
+				logger.Errorf("error getting AMQP channel: %v", err)
+				if err := retryQueue.Push(msg); err != nil {
+					logger.Errorf("failed to add message to retry queue: %v", err)
+				}
+				stats.IncrementFailed()
+				return
 			}
-			stats.IncrementFailed()
-			return
-		}
 
-		if err := publishMessage(ch, msg); err != nil {
-			logger.Errorf("error publishing message: %v", err)
-			if err := retryQueue.Push(msg); err != nil {
-				logger.Errorf("failed to add message to retry queue: %v", err)
-			}
-			stats.IncrementFailed()
-			connManager.CloseConnection(msg.URL)
-		} else {
+			if err := publishMessage(ch, msg); err != nil {
+				logger.Errorf("error publishing message: %v", err)
+				if err := retryQueue.Push(msg); err != nil {
+					logger.Errorf("failed to add message to retry queue: %v", err)
+				}
+				stats.IncrementFailed()
+				connManager.CloseConnection(msg.URL)
+			} else {
 				logger.Debugf("message sent and acknowledged: %s", msg.Message)
 				stats.IncrementSuccess()
 			}
