@@ -4,8 +4,8 @@ server:
 queue:
   max_size: "100MB"
 log:
-  # 日志级别: debug, info, warn, error
+  # Log levels: debug, info, warn, error
   level: "debug"
   file_path: "logs/amqp-agent.log"
-  max_age: 7        # 日志保留天数
-  rotation_time: 24 # 日志轮转时间(小时)
+  max_age: 7        # Log retention days
+  rotation_time: 24 # Log rotation hours

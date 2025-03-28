@@ -115,7 +115,7 @@ func initLogger(config *Config) (*logrus.Logger, error) {
 
 	logDir := filepath.Dir(config.Log.FilePath)
 	if err := os.MkdirAll(logDir, 0755); err != nil {
-		return nil, fmt.Errorf("创建日志目录失败: %v", err)
+		return nil, fmt.Errorf("failed to create log directory: %v", err)
 	}
 
 	maxAge := 7 * 24 * time.Hour
@@ -135,7 +135,7 @@ func initLogger(config *Config) (*logrus.Logger, error) {
 		rotatelogs.WithRotationTime(rotationTime),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("配置日志轮转失败: %v", err)
+		return nil, fmt.Errorf("failed to configure log rotation: %v", err)
 	}
 
 	mw := io.MultiWriter(os.Stdout, writer)
