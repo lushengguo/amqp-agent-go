@@ -27,11 +27,8 @@ var (
 	Log          = log.New(os.Stdout, "[INFO] ", log.LstdFlags|log.Lmsgprefix)
 )
 
-func init() {
-	flag.Parse()
-}
-
-func main() {
+// RunProducerExample 运行一个生产者示例，展示如何使用发布确认
+func RunProducerExample() {
 	exitCh := make(chan struct{})
 	confirmsCh := make(chan *amqp.DeferredConfirmation)
 	confirmsDoneCh := make(chan struct{})
