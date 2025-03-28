@@ -260,7 +260,7 @@ type AMQPConnection struct {
 	conn    *amqp.Connection
 	ch      *amqp.Channel
 	mu      sync.Mutex
-	confirms chan amqp.Confirmation  // 用于接收发布确认的通道
+	confirms chan amqp.Confirmation  
 }
 
 type ConnectionManager struct {
@@ -294,14 +294,12 @@ func (cm *ConnectionManager) GetConnection(url string, msg Message) (*amqp.Chann
 				return nil, err
 				}
 			
-			// 启用发布确认模式
 			if err := ch.Confirm(false); err != nil {
 				amqpConn.mu.Unlock()
 				logger.Errorf("Failed to enable confirm mode: %v", err)
 				return nil, fmt.Errorf("failed to enable confirm mode: %v", err)
 			}
 			
-			// 设置确认通道
 			amqpConn.confirms = ch.NotifyPublish(make(chan amqp.Confirmation, 100))
 			amqpConn.ch = ch
 			amqpConn.mu.Unlock()
@@ -338,7 +336,6 @@ func (cm *ConnectionManager) GetConnection(url string, msg Message) (*amqp.Chann
 		return nil, err
 	}
 
-	// 启用发布确认模式
 	if err := ch.Confirm(false); err != nil {
 		ch.Close()
 		conn.Close()
@@ -346,7 +343,6 @@ func (cm *ConnectionManager) GetConnection(url string, msg Message) (*amqp.Chann
 		return nil, fmt.Errorf("failed to enable confirm mode: %v", err)
 	}
 
-	// 创建确认通道
 	confirms := ch.NotifyPublish(make(chan amqp.Confirmation, 100))
 	
 	amqpConn = &AMQPConnection{
@@ -400,7 +396,6 @@ func publishMessage(ch *amqp.Channel, msg Message) error {
 
 	logger.Debugf("Publishing message to exchange: %s with routing key: %s", msg.Exchange, msg.RoutingKey)
 	
-	// 使用PublishWithDeferredConfirm来获取延迟确认
 	confirmation, err := ch.PublishWithDeferredConfirmWithContext(
 		ctx,
 		msg.Exchange,
@@ -419,7 +414,6 @@ func publishMessage(ch *amqp.Channel, msg Message) error {
 		return fmt.Errorf("error publishing message: %v", err)
 	}
 
-	// 设置超时上下文等待确认完成
 	select {
 	case <-confirmation.Done():
 		if confirmation.Acked() {
@@ -468,8 +462,6 @@ func handleConnection(conn net.Conn, retryQueue *RetryQueue, stats *Stats, connM
 
 		stats.IncrementReceived()
 
-		// 改为同步处理消息，确保错误处理逻辑在测试中正确执行
-		// 这样可以确保在测试中能够正确捕获错误
 		ch, err := connManager.GetConnection(msg.URL, msg)
 		if err != nil {
 			logger.Errorf("error getting AMQP channel: %v", err)
