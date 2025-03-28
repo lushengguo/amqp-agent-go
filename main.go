@@ -323,7 +323,6 @@ func handleConnection(conn net.Conn, retryQueue *RetryQueue, stats *Stats, logge
 	decoder := jstream.NewDecoder(conn, 0)
 
 	for streamObj := range decoder.Stream() {
-
 		jsonData, err := json.Marshal(streamObj.Value)
 		if err != nil {
 			logger.Errorf("error re-marshaling JSON: %v", err)
@@ -342,15 +341,15 @@ func handleConnection(conn net.Conn, retryQueue *RetryQueue, stats *Stats, logge
 		if err != nil {
 			logger.Errorf("error connecting to RabbitMQ: %v", err)
 			if err := retryQueue.Push(msg); err != nil {
-				logger.Errorf("failed to add message to retry queue: %v", err)
+                logger.Errorf("failed to add message to retry queue: %v", err)
 			}
 			stats.IncrementFailed()
 			continue
 		}
+        defer amqpConn.Close()
 
 		ch, err := amqpConn.Channel()
 		if err != nil {
-			amqpConn.Close()
 			logger.Errorf("error creating channel: %v", err)
 			if err := retryQueue.Push(msg); err != nil {
 				logger.Errorf("failed to add message to retry queue: %v", err)
@@ -358,6 +357,7 @@ func handleConnection(conn net.Conn, retryQueue *RetryQueue, stats *Stats, logge
 			stats.IncrementFailed()
 			continue
 		}
+		defer ch.Close()
 
 		if err := publishMessage(ch, msg); err != nil {
 			logger.Errorf("error publishing message: %v", err)
@@ -366,13 +366,9 @@ func handleConnection(conn net.Conn, retryQueue *RetryQueue, stats *Stats, logge
 			}
 			stats.IncrementFailed()
 		} else {
-
 			logger.Debugf("message sent and acknowledged: %s", msg.Message)
 			stats.IncrementSuccess()
 		}
-
-		ch.Close()
-		amqpConn.Close()
 	}
 }
 
