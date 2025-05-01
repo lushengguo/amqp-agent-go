@@ -29,7 +29,10 @@ type Config struct {
 func LoadConfig() (*Config, error) {
 	data, err := os.ReadFile("config/amqp-agent.yaml")
 	if err != nil {
-		return nil, fmt.Errorf("error reading configuration file: %v", err)
+		data, err = os.ReadFile("../config/amqp-agent.yaml")
+		if err != nil {
+			return nil, fmt.Errorf("error reading configuration file: %v", err)
+		}
 	}
 
 	var config Config

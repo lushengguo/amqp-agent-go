@@ -182,7 +182,7 @@ func produceMessage(ch *amqp.Channel, m *Message) error {
 	if confirmCh.Acked() {
 		return nil
 	} else {
-		GetLogger().Warnf("produce %d m not acked: timeout", m.Message)
+		GetLogger().Warnf("produce %s m not acked: timeout", m.Message)
 		return fmt.Errorf("produce timeout")
 	}
 }
