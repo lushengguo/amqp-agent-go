@@ -3,8 +3,9 @@ package main
 import (
 	"crypto/rand"
 	"encoding/binary"
-	"strconv"
+	"math"
 	"testing"
+	"strconv"
 )
 
 func randomUint32() (uint32, error) {
@@ -17,74 +18,30 @@ func randomUint32() (uint32, error) {
 }
 
 func TestParseSize(t *testing.T) {
-	{
-		_, err := parseSize("")
-		if err == nil {
-			t.Errorf("Expected no error, got %v", err)
-		}
+	tests := []struct {
+		name     string
+		input    string
+		expected uint64
+		hasError bool
+	}{
+		{"Empty input", "", 0, true},
+		{"Valid KB (lowercase)", "1024kb", 1024 * 1024, false},
+		{"Valid KB (uppercase)", "1024KB", 1024 * 1024, false},
+		{"Valid MB", "1MB", 1 * 1024 * 1024, false},
+		{"Valid GB", "1GB", 1 * 1024 * 1024 * 1024, false},
+		{"Unsupported TB", "1TB", 0, true},
+		{"Overflow, KB", strconv.FormatUint(math.MaxUint64, 10) + "KB", 0, true},
 	}
 
-	// little case suffix is also supported
-	{
-		base, err := randomUint32()
-		if err != nil {
-			t.Errorf("randomUint32 is not expected to return error")
-		}
-		size, err := parseSize(strconv.Itoa(int(base)) + "kb")
-		if err != nil {
-			t.Errorf("Expected no error, got %v", err)
-		}
-		if size != uint64(base)*1024 {
-			t.Errorf("Expected size 10KB, got %d", size)
-		}
-	}
-
-	{
-		base, err := randomUint32()
-		if err != nil {
-			t.Errorf("randomUint32 is not expected to return error")
-		}
-		size, err := parseSize(strconv.Itoa(int(base)) + "KB")
-		if err != nil {
-			t.Errorf("Expected no error, got %v", err)
-		}
-		if size != uint64(base)*1024 {
-			t.Errorf("Expected size 10KB, got %d", size)
-		}
-	}
-
-	{
-		base, err := randomUint32()
-		if err != nil {
-			t.Errorf("randomUint32 is not expected to return error")
-		}
-		size, err := parseSize(strconv.Itoa(int(base)) + "MB")
-		if err != nil {
-			t.Errorf("Expected no error, got %v", err)
-		}
-		if size != uint64(base)*1024*1024 {
-			t.Errorf("Expected size 10KB, got %d", size)
-		}
-	}
-
-	{
-		base, err := randomUint32()
-		if err != nil {
-			t.Errorf("randomUint32 is not expected to return error")
-		}
-		size, err := parseSize(strconv.Itoa(int(base)) + "GB")
-		if err != nil {
-			t.Errorf("Expected no error, got %v", err)
-		}
-		if size != uint64(base)*1024*1024*1024 {
-			t.Errorf("Expected size 10KB, got %d", size)
-		}
-	}
-
-	{
-		_, err := parseSize("1TB")
-		if err == nil {
-			t.Errorf("TB suffix is not supported: %v", err)
-		}
+	for _, testcase := range tests {
+		t.Run(testcase.name, func(t *testing.T) {
+			size, err := parseSize(testcase.input)
+			if (err != nil) != testcase.hasError {
+				t.Errorf("Expected error: %v, got: %v", testcase.hasError, err)
+			}
+			if size != testcase.expected {
+				t.Errorf("Expected size: %d, got: %d", testcase.expected, size)
+			}
+		})
 	}
 }

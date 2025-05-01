@@ -78,7 +78,12 @@ func parseSize(sizeStr string) (uint64, error) {
 		return 0, fmt.Errorf("unsupported unit: %s", unit)
 	}
 
-	return size * multiplier, nil
+	total := size * multiplier
+	if (total / multiplier) == size {
+		return total, nil
+	} else {
+		return 0, fmt.Errorf("%d*%d overflowed", size, multiplier)
+	}
 }
 
 func (c *Config) GetMaxSize() uint64 {
