@@ -37,7 +37,7 @@ queue:
     "exchange": "exchange_name",
     "exchange_type": "direct",
     "routing_key": "routing_key",
-    "message": "message_content",
+    "m": "message_content",
     "timestamp": 1234567890
 }
 ```
@@ -64,7 +64,7 @@ echo '{
     "exchange": "test_exchange",
     "exchange_type": "direct",
     "routing_key": "test_key",
-    "message": "Hello RabbitMQ!",
+    "m": "Hello RabbitMQ!",
     "timestamp": 1234567890
 }' | nc localhost 8080
 ```

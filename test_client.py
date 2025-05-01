@@ -27,7 +27,7 @@ class MessageGenerator:
         self.message_id = 0
 
     def generate_message(self) -> Dict[str, Any]:
-        """Generate a test message"""
+        """Generate a test m"""
         self.message_id += 1
 
         # Randomly select exchange and routing key
@@ -35,21 +35,19 @@ class MessageGenerator:
         exchange_type = EXCHANGE_TYPES[EXCHANGES.index(exchange)]
         routing_key = random.choice(ROUTING_KEYS)
 
-        # Get current timestamp
         timestamp = int(time.time())
 
-        # Generate message content
-        message = {
+        m = {
             "url": "amqp://guest:guest@localhost:5672/",
             "exchange": exchange,
             "exchange_type": exchange_type,
             "routing_key": routing_key,
-            "message": f"Test message #{self.message_id}, sent at: {datetime.datetime.now().isoformat()}",
+            "m": f"Test m #{self.message_id}, sent at: {datetime.datetime.now().isoformat()}",
             "timestamp": timestamp
         }
 
-        # Construct complete message
-        return message
+        # Construct complete m
+        return m
 
 class MessageSender:
     """TCP client for sending messages"""
@@ -69,18 +67,18 @@ class MessageSender:
             print(f"Failed to connect: {e}")
             return False
 
-    def send_message(self, message: Dict[str, Any]) -> bool:
+    def send_message(self, m: Dict[str, Any]) -> bool:
         if not self.sock:
             if not self.connect():
                 return False
 
         try:
-            message_json = json.dumps(message)
+            message_json = json.dumps(m)
             message_bytes = (message_json + "\n").encode("utf-8")
             self.sock.sendall(message_bytes)
             return True
         except Exception as e:
-            print(f"Failed to send message: {e}")
+            print(f"Failed to send m: {e}")
             self.sock = None
             return False
 
@@ -98,10 +96,10 @@ def main():
     sent_count = 0
     try:
         while args.count == -1 or sent_count < args.count:
-            message = generator.generate_message()
-            if sender.send_message(message):
+            m = generator.generate_message()
+            if sender.send_message(m):
                 sent_count += 1
-                print(f"Sent message {sent_count}")
+                print(f"Sent m {sent_count}")
             time.sleep(args.interval)
     except KeyboardInterrupt:
         print("\nStopped by user")
