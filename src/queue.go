@@ -7,15 +7,17 @@ import (
 )
 
 type RetryQueue struct {
-	messages []*Message
-	mu       sync.Mutex
-	maxSize  uint64
+	messages    []*Message
+	mu          sync.Mutex
+	maxSize     uint64
+	currentSize uint64
 }
 
 func NewRetryQueue(maxSize uint64) *RetryQueue {
 	return &RetryQueue{
-		messages: make([]*Message, 0),
-		maxSize:  maxSize,
+		messages:    make([]*Message, 0),
+		maxSize:     maxSize,
+		currentSize: 0,
 	}
 }
 
@@ -23,24 +25,17 @@ func (q *RetryQueue) Push(m *Message) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	currentSize := uint64(0)
-	for _, m := range q.messages {
-		msgBytes, _ := json.Marshal(m)
-		currentSize += uint64(len(msgBytes))
-	}
-
 	newMsgBytes, _ := json.Marshal(m)
 	newSize := uint64(len(newMsgBytes))
-
-	for currentSize+newSize > q.maxSize && len(q.messages) > 0 {
-		removedMsg := q.messages[0]
-		removedBytes, _ := json.Marshal(removedMsg)
-		currentSize -= uint64(len(removedBytes))
-		q.messages = q.messages[1:]
-	}
-
 	if newSize > q.maxSize {
 		return fmt.Errorf("m size (%d bytes) exceeds queue maximum limit (%d bytes)", newSize, q.maxSize)
+	}
+
+	for q.currentSize+newSize > q.maxSize && len(q.messages) > 0 {
+		removedMsg := q.messages[0]
+		removedBytes, _ := json.Marshal(removedMsg)
+		q.currentSize -= uint64(len(removedBytes))
+		q.messages = q.messages[1:]
 	}
 
 	q.messages = append(q.messages, m)
@@ -56,6 +51,8 @@ func (q *RetryQueue) Pop() *Message {
 	}
 
 	m := q.messages[0]
+	mBytes, _ := json.Marshal(m)
+	q.currentSize -= uint64(len(mBytes))
 	q.messages = q.messages[1:]
 	return m
 }
