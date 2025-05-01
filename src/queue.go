@@ -31,14 +31,20 @@ func (q *RetryQueue) Push(m *Message) error {
 		return fmt.Errorf("m size (%d bytes) exceeds queue maximum limit (%d bytes)", newSize, q.maxSize)
 	}
 
-	for q.currentSize+newSize > q.maxSize && len(q.messages) > 0 {
+	q.messages = append(q.messages, m)
+	q.currentSize += newSize
+	for {
+		if q.currentSize <= q.maxSize || len(q.messages) == 0 {
+			break
+		}
+
 		removedMsg := q.messages[0]
 		removedBytes, _ := json.Marshal(removedMsg)
 		q.currentSize -= uint64(len(removedBytes))
 		q.messages = q.messages[1:]
+
 	}
 
-	q.messages = append(q.messages, m)
 	return nil
 }
 

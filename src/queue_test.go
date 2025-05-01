@@ -34,6 +34,37 @@ func TestNewRetryQueue(t *testing.T) {
 	}
 }
 
+func TestRetryQueue_DropData(t *testing.T) {
+	m := Message{URL: "http://example.com", Message: "test1"}
+	mBytes, _ := json.Marshal(m)
+	messageSize := len(mBytes)
+
+	q := NewRetryQueue(uint64(messageSize))
+	m1 := &Message{URL: "http://example.com", Message: "test1"}
+	m2 := &Message{URL: "http://example.com", Message: "test2"}
+
+	// 添加消息
+	if err := q.Push(m1); err != nil {
+		t.Fatalf("Push() error = %v", err)
+	}
+	if err := q.Push(m2); err != nil {
+		t.Fatalf("Push() error = %v", err)
+	}
+
+	if len(q.messages) != 1 {
+		t.Errorf("Expected 1 messages in queue, got %d", len(q.messages))
+	}
+
+	message := q.Pop()
+	if *message != *m2 {
+		t.Errorf("Expected message %v, got %v", *m2, *message)
+	}
+
+	if len(q.messages) != 0 {
+		t.Errorf("Expected 0 message in queue, got %d", len(q.messages))
+	}
+}
+
 func TestRetryQueue_Push(t *testing.T) {
 	m := Message{URL: "http://example.com", Message: "test1"}
 	mBytes, _ := json.Marshal(m)
