@@ -49,6 +49,7 @@ func (manager *AmqpConnectionManager) CreateConnection(m *Message) error {
 	conn, err := amqp.DialConfig(m.Locator(), config)
 	if err != nil {
 		GetLogger().Fatalf("producer: error in dial: %s", err)
+		return err
 	}
 	defer conn.Close()
 
@@ -56,6 +57,7 @@ func (manager *AmqpConnectionManager) CreateConnection(m *Message) error {
 	channel, err := conn.Channel()
 	if err != nil {
 		GetLogger().Fatalf("error getting a channel: %s", err)
+		return err
 	}
 	defer channel.Close()
 
@@ -70,6 +72,32 @@ func (manager *AmqpConnectionManager) CreateConnection(m *Message) error {
 		nil,            // arguments
 	); err != nil {
 		GetLogger().Fatalf("producer: Exchange Declare: %s", err)
+		return err
+	}
+
+	if len(m.Queue) != 0 {
+		GetLogger().Infof("producer: declaring queue '%s'", m.Queue)
+		queue, err := channel.QueueDeclare(
+			m.Queue, // name of the queue
+			true,    // durable
+			false,   // delete when unused
+			false,   // exclusive
+			false,   // noWait
+			nil,     // arguments
+		)
+		if err == nil {
+			GetLogger().Infof("producer: declared queue (%q %d messages, %d consumers), binding to Exchange (key %q)",
+				queue.Name, queue.Messages, queue.Consumers, m.RoutingKey)
+		} else {
+			GetLogger().Fatalf("producer: Queue Declare: %s", err)
+			return err
+		}
+
+		GetLogger().Infof("producer: declaring binding")
+		if err := channel.QueueBind(queue.Name, m.RoutingKey, m.Exchange, false, nil); err != nil {
+			GetLogger().Fatalf("producer: Queue Bind: %s", err)
+			return err
+		}
 	}
 
 	// Reliable publisher confirms require confirm.select support from the
@@ -77,6 +105,7 @@ func (manager *AmqpConnectionManager) CreateConnection(m *Message) error {
 	GetLogger().Infof("producer: enabling publisher confirms.")
 	if err := channel.Confirm(false); err != nil {
 		GetLogger().Fatalf("producer: channel could not be put into confirm mode: %s", err)
+		return err
 	}
 
 	// save to map
@@ -178,12 +207,20 @@ func produceMessage(ch *amqp.Channel, m *Message) error {
 		return err
 	}
 
-	time.Sleep(time.Second * 10)
-	if confirmCh.Acked() {
-		return nil
-	} else {
-		GetLogger().Warnf("produce %s m not acked: timeout", m.Message)
-		return fmt.Errorf("produce timeout")
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	timeout := time.After(10 * time.Second)
+
+	for {
+		select {
+		case <-ticker.C:
+			if confirmCh.Acked() {
+				return nil
+			}
+		case <-timeout:
+			GetLogger().Warnf("produce %s message not acked: timeout", m.Message)
+			return fmt.Errorf("produce timeout")
+		}
 	}
 }
 

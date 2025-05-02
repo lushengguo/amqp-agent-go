@@ -2,8 +2,8 @@ package main
 
 import (
 	"encoding/json"
-	"net"
 	"github.com/bcicen/jstream"
+	"net"
 )
 
 type Message struct {
@@ -13,10 +13,11 @@ type Message struct {
 	RoutingKey   string `json:"routing_key"`
 	Message      string `json:"m"`
 	Timestamp    uint32 `json:"timestamp"`
+	Queue        string `json:"queue"`
 }
 
 func (m *Message) Locator() string {
-	return m.URL + " " + m.Exchange + " " + m.RoutingKey
+	return m.URL + " " + m.Exchange + " " + m.RoutingKey + " " + m.Queue
 }
 
 func handleConnection(conn net.Conn) {
