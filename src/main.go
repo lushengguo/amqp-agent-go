@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -39,7 +40,11 @@ func GetLogger() *logrus.Logger {
 		loggerInstance.SetFormatter(&logrus.TextFormatter{
 			FullTimestamp:   true,
 			TimestampFormat: "2006-01-02 15:04:05",
+			CallerPrettyfier: func(f *runtime.Frame) (string, string) {
+				return fmt.Sprintf("%s()", f.Function), fmt.Sprintf("%s:%d", filepath.Base(f.File), f.Line)
+			},
 		})
+		loggerInstance.SetReportCaller(true)
 
 		logDir := filepath.Dir(configInstance.Log.FilePath)
 		if err := os.MkdirAll(logDir, 0755); err != nil {
@@ -107,7 +112,7 @@ func main() {
 	addr := fmt.Sprintf("%s:%d", config.Server.Host, config.Server.Port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
-		GetLogger().Fatalf("Error starting server: %v", err)
+		GetLogger().Errorf("Error starting server: %v", err)
 	}
 	defer listener.Close()
 

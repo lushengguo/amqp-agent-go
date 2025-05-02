@@ -28,16 +28,6 @@ func NewAmqpConnectionManager() *AmqpConnectionManager {
 }
 
 func (manager *AmqpConnectionManager) CreateConnection(m *Message) error {
-	{
-		manager.mu.Lock()
-		defer manager.mu.Unlock()
-
-		conn := manager.connections[m.Locator()]
-		if conn != nil {
-			return nil
-		}
-	}
-
 	// have convinced that connection is nil and construct it now
 	config := amqp.Config{
 		Vhost:      "/",
@@ -46,9 +36,9 @@ func (manager *AmqpConnectionManager) CreateConnection(m *Message) error {
 	config.Properties.SetClientConnectionName("producer-with-confirms")
 
 	GetLogger().Infof("producer: dialing %s", m.Locator())
-	conn, err := amqp.DialConfig(m.Locator(), config)
+	conn, err := amqp.DialConfig(m.URL, config)
 	if err != nil {
-		GetLogger().Fatalf("producer: error in dial: %s", err)
+		GetLogger().Errorf("producer: error in dial: %s", err)
 		return err
 	}
 	defer conn.Close()
@@ -56,7 +46,7 @@ func (manager *AmqpConnectionManager) CreateConnection(m *Message) error {
 	GetLogger().Println("producer: got Connection, getting Channel")
 	channel, err := conn.Channel()
 	if err != nil {
-		GetLogger().Fatalf("error getting a channel: %s", err)
+		GetLogger().Errorf("error getting a channel: %s", err)
 		return err
 	}
 	defer channel.Close()
@@ -71,7 +61,7 @@ func (manager *AmqpConnectionManager) CreateConnection(m *Message) error {
 		false,          // noWait
 		nil,            // arguments
 	); err != nil {
-		GetLogger().Fatalf("producer: Exchange Declare: %s", err)
+		GetLogger().Errorf("producer: Exchange Declare: %s", err)
 		return err
 	}
 
@@ -89,13 +79,13 @@ func (manager *AmqpConnectionManager) CreateConnection(m *Message) error {
 			GetLogger().Infof("producer: declared queue (%q %d messages, %d consumers), binding to Exchange (key %q)",
 				queue.Name, queue.Messages, queue.Consumers, m.RoutingKey)
 		} else {
-			GetLogger().Fatalf("producer: Queue Declare: %s", err)
+			GetLogger().Errorf("producer: Queue Declare: %s", err)
 			return err
 		}
 
 		GetLogger().Infof("producer: declaring binding")
 		if err := channel.QueueBind(queue.Name, m.RoutingKey, m.Exchange, false, nil); err != nil {
-			GetLogger().Fatalf("producer: Queue Bind: %s", err)
+			GetLogger().Errorf("producer: Queue Bind: %s", err)
 			return err
 		}
 	}
@@ -104,7 +94,7 @@ func (manager *AmqpConnectionManager) CreateConnection(m *Message) error {
 	// connection.
 	GetLogger().Infof("producer: enabling publisher confirms.")
 	if err := channel.Confirm(false); err != nil {
-		GetLogger().Fatalf("producer: channel could not be put into confirm mode: %s", err)
+		GetLogger().Errorf("producer: channel could not be put into confirm mode: %s", err)
 		return err
 	}
 
@@ -151,13 +141,13 @@ func (manager *AmqpConnectionManager) CloseConnection(url string) {
 
 	if amqpConn, exists := manager.connections[url]; exists {
 		amqpConn.mu.Lock()
+		defer amqpConn.mu.Unlock()
 		if amqpConn.ch != nil {
 			amqpConn.ch.Close()
 		}
 		if amqpConn.conn != nil {
 			amqpConn.conn.Close()
 		}
-		amqpConn.mu.Unlock()
 		delete(manager.connections, url)
 	}
 }
@@ -203,7 +193,7 @@ func produceMessage(ch *amqp.Channel, m *Message) error {
 		},
 	)
 	if err != nil {
-		GetLogger().Fatalf("producer: error in publish: %s", err)
+		GetLogger().Errorf("producer: error in publish: %s", err)
 		return err
 	}
 

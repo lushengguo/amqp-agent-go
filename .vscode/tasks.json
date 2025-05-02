@@ -1,0 +1,29 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "go-build",
+            "type": "shell",
+            "command": "mkdir -p bin && go build -o bin/amqp-agent ./src",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "silent"
+            },
+            "dependsOn": [
+                "clear_cache"
+            ],
+        },
+        {
+            "type": "shell",
+            "label": "clear_cache",
+            "command": "rm",
+            "args": [
+                "-rf",
+                "${workspaceFolder}/bin",
+            ]
+        },
+    ]
+}

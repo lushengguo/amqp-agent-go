@@ -45,10 +45,10 @@ func TestRetryQueue_DropData(t *testing.T) {
 
 	// 添加消息
 	if err := q.Push(m1); err != nil {
-		t.Fatalf("Push() error = %v", err)
+		t.Errorf("Push() error = %v", err)
 	}
 	if err := q.Push(m2); err != nil {
-		t.Fatalf("Push() error = %v", err)
+		t.Errorf("Push() error = %v", err)
 	}
 
 	if len(q.messages) != 1 {
@@ -124,14 +124,14 @@ func TestRetryQueue_Pop(t *testing.T) {
 	// 添加消息并按序弹出
 	for _, m := range messages {
 		if err := q.Push(m); err != nil {
-			t.Fatalf("Push() error = %v", err)
+			t.Errorf("Push() error = %v", err)
 		}
 	}
 
 	for i, want := range messages {
 		got := q.Pop()
 		if got == nil {
-			t.Fatalf("Pop() message %d = nil, want %v", i, want)
+			t.Errorf("Pop() message %d = nil, want %v", i, want)
 		}
 		if got.Message != want.Message {
 			t.Errorf("Pop() message %d = %v, want %v", i, got.Message, want.Message)
@@ -148,7 +148,7 @@ func TestRetryQueue_IsEmpty(t *testing.T) {
 
 	msg := &Message{URL: "http://example.com", Message: "test"}
 	if err := q.Push(msg); err != nil {
-		t.Fatalf("Push() error = %v", err)
+		t.Errorf("Push() error = %v", err)
 	}
 
 	if q.IsEmpty() {

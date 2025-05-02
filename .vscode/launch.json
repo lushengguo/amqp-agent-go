@@ -1,0 +1,16 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug AMQP Agent",
+            "type": "go",
+            "request": "launch",
+            "mode": "exec",
+            "program": "${workspaceFolder}/bin/amqp-agent",
+            "console" : "integratedTerminal",
+            "output": "${workspaceFolder}/bin/amqp-agent",
+            "preLaunchTask": "go-build",
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
