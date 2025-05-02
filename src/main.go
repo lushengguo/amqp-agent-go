@@ -6,7 +6,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
+	// "runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +25,27 @@ var (
 	onceStat           sync.Once
 )
 
+type CustomFormatter struct {
+	TimestampFormat string
+}
+
+func (f *CustomFormatter) Format(entry *logrus.Entry) ([]byte, error) {
+	timestamp := entry.Time.Format(f.TimestampFormat)
+	var fileInfo string
+	if entry.HasCaller() {
+		fileInfo = fmt.Sprintf("%s:%d", filepath.Base(entry.Caller.File), entry.Caller.Line)
+	}
+
+	msg := fmt.Sprintf("%s %s %s %s\n",
+		timestamp,
+		strings.ToUpper(entry.Level.String()),
+		entry.Message,
+		fileInfo,
+	)
+
+	return []byte(msg), nil
+}
+
 func GetLogger() *logrus.Logger {
 	onceLogger.Do(func() {
 		if configInstance == nil {
@@ -37,12 +59,8 @@ func GetLogger() *logrus.Logger {
 		}
 		loggerInstance.SetLevel(level)
 
-		loggerInstance.SetFormatter(&logrus.TextFormatter{
-			FullTimestamp:   true,
+		loggerInstance.SetFormatter(&CustomFormatter{
 			TimestampFormat: "2006-01-02 15:04:05",
-			CallerPrettyfier: func(f *runtime.Frame) (string, string) {
-				return fmt.Sprintf("%s()", f.Function), fmt.Sprintf("%s:%d", filepath.Base(f.File), f.Line)
-			},
 		})
 		loggerInstance.SetReportCaller(true)
 
