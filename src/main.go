@@ -90,11 +90,10 @@ func GetRetryQueue() *RetryQueue {
 
 func GetStatistic() *Statistic {
 	onceStat.Do(func() {
-		statisticInstance = &Statistic{}
+		statisticInstance = &Statistic{statistic: make(map[string]*eachLocationStatistic)}
 	})
 	return statisticInstance
 }
-
 
 func main() {
 	config, err := LoadConfig()

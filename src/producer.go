@@ -41,7 +41,6 @@ func (manager *AmqpConnectionManager) CreateConnection(m *Message) error {
 		GetLogger().Errorf("producer: error in dial: %s", err)
 		return err
 	}
-	defer conn.Close()
 
 	GetLogger().Println("producer: got Connection, getting Channel")
 	channel, err := conn.Channel()
@@ -49,7 +48,6 @@ func (manager *AmqpConnectionManager) CreateConnection(m *Message) error {
 		GetLogger().Errorf("error getting a channel: %s", err)
 		return err
 	}
-	defer channel.Close()
 
 	GetLogger().Infof("producer: declaring exchange")
 	if err := channel.ExchangeDeclare(
@@ -153,7 +151,7 @@ func (manager *AmqpConnectionManager) CloseConnection(url string) {
 }
 
 func Produce(m *Message) {
-	GetStatistic().IncrementProduced()
+	GetStatistic().IncrementProduced(m.Locator())
 
 	if m.Locator() == "" {
 		GetLogger().Errorf("URL is empty, cannot produce m: %s", m.Message)
@@ -172,11 +170,12 @@ func Produce(m *Message) {
 		return
 	}
 
-	GetStatistic().IncrementConfirmed()
+	GetStatistic().IncrementConfirmed(m.Locator())
 }
 
 func produceMessage(ch *amqp.Channel, m *Message) error {
-	GetLogger().Infof("producer: publishing %dB body (%q)", len(m.Message), m.Message)
+	GetLogger().Debugf("producing message to %s, body:(%q) ", m.Locator(), m.Message)
+
 	confirmCh, err := ch.PublishWithDeferredConfirm(
 		m.Exchange,
 		m.RoutingKey,
@@ -197,7 +196,7 @@ func produceMessage(ch *amqp.Channel, m *Message) error {
 		return err
 	}
 
-	ticker := time.NewTicker(time.Second)
+	ticker := time.NewTicker(time.Millisecond * 100)
 	defer ticker.Stop()
 	timeout := time.After(10 * time.Second)
 
@@ -205,6 +204,7 @@ func produceMessage(ch *amqp.Channel, m *Message) error {
 		select {
 		case <-ticker.C:
 			if confirmCh.Acked() {
+				GetLogger().Debugf("confirmed message to %s, body:(%q) ", m.Locator(), m.Message)
 				return nil
 			}
 		case <-timeout:

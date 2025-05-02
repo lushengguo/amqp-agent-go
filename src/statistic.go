@@ -4,40 +4,56 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
+type eachLocationStatistic struct {
+	producedCount  uint64
+	confirmedCount uint64
+}
+
 type Statistic struct {
-	producedCount     uint64
-	confirmedCount      uint64
-	lastReceivedCount uint64
-	lastSuccessCount  uint64
-	lastFailedCount   uint64
-	mu                sync.Mutex
+	statistic map[string]*eachLocationStatistic
+	mu        sync.Mutex
 }
 
-func (s *Statistic) IncrementProduced() {
-	atomic.AddUint64(&s.producedCount, 1)
+func (s *Statistic) IncrementProduced(locator string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.statistic[locator]; !ok {
+		s.statistic[locator] = &eachLocationStatistic{}
+		s.statistic[locator].producedCount = 1
+	} else {
+		s.statistic[locator].producedCount++
+	}
 }
 
-func (s *Statistic) IncrementConfirmed() {
-	atomic.AddUint64(&s.confirmedCount, 1)
+func (s *Statistic) IncrementConfirmed(locator string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.statistic[locator].confirmedCount++
 }
 
 func (s *Statistic) Reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lastReceivedCount = s.producedCount
-	s.lastSuccessCount = s.confirmedCount
+	for _, stat := range s.statistic {
+		stat.producedCount = 0
+		stat.confirmedCount = 0
+	}
 }
 
-func (s *Statistic) GetStats() (uint64, uint64, uint64) {
+func (s *Statistic) statisticResult() map[string]eachLocationStatistic {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.producedCount - s.lastReceivedCount,
-		s.confirmedCount - s.lastSuccessCount,
-		s.producedCount - s.confirmedCount
+
+	result := make(map[string]eachLocationStatistic)
+	for k, v := range s.statistic {
+		result[k] = *v
+	}
+	return result
 }
 
 func getMemoryStatistic() string {
@@ -50,13 +66,17 @@ func getMemoryStatistic() string {
 }
 
 func PeriodicallyStatisticReport() {
-	ticker := time.NewTicker(20 * time.Second)
+	tickS := 20
+	ticker := time.NewTicker(time.Duration(tickS) * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		received, success, failed := GetStatistic().GetStats()
+		m := GetStatistic().statisticResult()
 		GetStatistic().Reset()
-		GetLogger().Infof("Statistics - Within 20 seconds: Received messages: %d, Successfully sent: %d, Failed: %d, Memory usage: %s",
-			received, success, failed, getMemoryStatistic())
+		for k, v := range m {
+			GetStatistic().Reset()
+			GetLogger().Infof("Statistics - Within %d seconds: %s Received:%d, confirmed:%d, Memory usage: %s",
+				tickS, k, v.producedCount, v.confirmedCount, getMemoryStatistic())
+		}
 	}
 }

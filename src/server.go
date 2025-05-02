@@ -17,7 +17,7 @@ type Message struct {
 }
 
 func (m *Message) Locator() string {
-	return m.URL + " " + m.Exchange + " " + m.RoutingKey + " " + m.Queue
+	return m.URL + "_" + m.Exchange + ":" + m.RoutingKey + ":" + m.Queue
 }
 
 func handleConnection(conn net.Conn) {
@@ -38,7 +38,6 @@ func handleConnection(conn net.Conn) {
 			continue
 		}
 
-		GetLogger().Debugf("Received m: %+v", m)
 		go func(m *Message) {
 			Produce(m)
 		}(m)
