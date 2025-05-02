@@ -75,8 +75,9 @@ func PeriodicallyStatisticReport() {
 		GetStatistic().Reset()
 		for k, v := range m {
 			GetStatistic().Reset()
-			GetLogger().Infof("Statistics - Within %d seconds: %s Received:%d, confirmed:%d, Memory usage: %s",
-				tickS, k, v.producedCount, v.confirmedCount, getMemoryStatistic())
+			GetLogger().Infof("Statistics - Within %d seconds: %s Received:%d, confirmed:%d",
+				tickS, k, v.producedCount, v.confirmedCount)
 		}
+		GetLogger().Infof("Statistics - Memory usage: %s", getMemoryStatistic())
 	}
 }

@@ -113,6 +113,26 @@ func GetStatistic() *Statistic {
 	return statisticInstance
 }
 
+func PeriodicallyFlushLogLevel() {
+	tickS := 1
+	ticker := time.NewTicker(time.Duration(tickS) * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		config, err := LoadConfig()
+		if err != nil {
+			GetLogger().Warnf("Error loading configuration: %v\n", err)
+			continue	
+		}
+
+		level, err := logrus.ParseLevel(config.Log.Level)
+		if err != nil {
+			level = logrus.InfoLevel
+		}
+		GetLogger().SetLevel(level)
+	}
+}
+
 func main() {
 	config, err := LoadConfig()
 	if err != nil {
@@ -125,6 +145,7 @@ func main() {
 
 	go PeriodicallyStatisticReport()
 	go PeriodicallyReproduceFailedMessage()
+	go PeriodicallyFlushLogLevel()
 
 	addr := fmt.Sprintf("%s:%d", config.Server.Host, config.Server.Port)
 	listener, err := net.Listen("tcp", addr)

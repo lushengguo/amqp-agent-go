@@ -196,21 +196,12 @@ func produceMessage(ch *amqp.Channel, m *Message) error {
 		return err
 	}
 
-	ticker := time.NewTicker(time.Millisecond * 100)
-	defer ticker.Stop()
-	timeout := time.After(10 * time.Second)
-
-	for {
-		select {
-		case <-ticker.C:
-			if confirmCh.Acked() {
-				GetLogger().Debugf("confirmed message to %s, body:(%q) ", m.Locator(), m.Message)
-				return nil
-			}
-		case <-timeout:
-			GetLogger().Warnf("produce %s message not acked: timeout", m.Message)
-			return fmt.Errorf("produce timeout")
-		}
+	select {
+	case <-confirmCh.Done():
+		GetLogger().Debugf("confirmed message to %s, body:(%q) ", m.Locator(), m.Message)
+		return nil
+	case <-time.After(10 * time.Second):
+		return fmt.Errorf("confirm timeout")
 	}
 }
 

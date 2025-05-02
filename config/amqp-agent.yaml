@@ -5,7 +5,7 @@ queue:
   max_size: "100MB"
 log:
   # Log levels: debug, info, warn, error
-  level: "debug"
+  level: "info"
   file_path: "logs/amqp-agent.log"
   max_age: 7        # Log retention days
   rotation_time: 24 # Log rotation hours
