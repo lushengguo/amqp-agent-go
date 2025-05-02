@@ -16,7 +16,8 @@ DEFAULT_PORT = 8080         # Rust service port
 DEFAULT_INTERVAL = 100      # Send interval (milliseconds)
 DEFAULT_COUNT = -1          # Number of messages to send, -1 means infinite
 
-TEST_N_EXCHANGES = 10
+TEST_N_EXCHANGES = 1
+MAX_N_QUEUE_EACH_EXCHANGE = 1
 EXCHANGE_TYPES = ["direct", "topic"]
 
 
@@ -42,7 +43,7 @@ returned json layout:
 def random_rabbitmq_routes(n):
     """Generate random RabbitMQ routes"""
     routes = []
-    routing_key_num = random.randint(1, 5)
+    routing_key_num = random.randint(1, MAX_N_QUEUE_EACH_EXCHANGE)
     routing_keys = [f"test_{random_string()}" for _ in range(routing_key_num)]
     queues = [f"test_{random_string()}" for _ in range(routing_key_num)]
 

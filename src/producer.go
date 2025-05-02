@@ -11,9 +11,9 @@ import (
 var connectionManager = NewAmqpConnectionManager()
 
 type AMQPConnection struct {
-	conn *amqp.Connection
-	ch   *amqp.Channel
-	mu   sync.Mutex
+	conn         *amqp.Connection
+	ch           *amqp.Channel
+	reconnecting bool
 }
 
 type AmqpConnectionManager struct {
@@ -99,55 +99,51 @@ func (manager *AmqpConnectionManager) CreateConnection(m *Message) error {
 	// save to map
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
-	manager.connections[m.Locator()] = &AMQPConnection{
-		conn: conn,
-		ch:   channel,
-	}
+	manager.connections[m.Locator()].conn = conn
+	manager.connections[m.Locator()].ch = channel
 
 	return nil
+}
+
+func (manager *AmqpConnectionManager) DoReconnect(m *Message) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	conn := manager.connections[m.Locator()]
+	if conn.reconnecting {
+		return
+	}
+	conn.reconnecting = true
+	conn.ch = nil
+	conn.conn = nil
+
+	go func() {
+		for {
+			err := manager.CreateConnection(m)
+			if err == nil {
+				break
+			}
+			// we always want to eagerly reconnect to the server and guarantee the success rate
+			// cause the queue is not infinite and oldest messages will be dropped
+			// do not use backoff here
+			time.Sleep(time.Second)
+		}
+		conn.reconnecting = false
+	}()
 }
 
 func (manager *AmqpConnectionManager) GetConnection(m *Message) *amqp.Channel {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 
-	// during connection construct will place a nil to the map
-	// which could be treat as failure for outer caller
-	// they should retry later
-	if conn, exists := manager.connections[m.Locator()]; exists {
-		return conn.ch
-	} else {
-		manager.connections[m.Locator()] = nil
+	_, exists := manager.connections[m.Locator()]
+	if !exists {
+		manager.connections[m.Locator()] = &AMQPConnection{}
 		go func() {
-			err := manager.CreateConnection(m)
-
-			// if async create connection failed, remove it and it will retry later
-			if err != nil {
-				manager.mu.Lock()
-				defer manager.mu.Unlock()
-				delete(manager.connections, m.Locator())
-			}
+			// avoiding deadlock
+			manager.DoReconnect(m)
 		}()
 	}
-
-	return nil
-}
-
-func (manager *AmqpConnectionManager) CloseConnection(url string) {
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
-
-	if amqpConn, exists := manager.connections[url]; exists {
-		amqpConn.mu.Lock()
-		defer amqpConn.mu.Unlock()
-		if amqpConn.ch != nil {
-			amqpConn.ch.Close()
-		}
-		if amqpConn.conn != nil {
-			amqpConn.conn.Close()
-		}
-		delete(manager.connections, url)
-	}
+	return manager.connections[m.Locator()].ch
 }
 
 func Produce(m *Message) {
@@ -165,6 +161,7 @@ func Produce(m *Message) {
 	}
 
 	if err := produceMessage(ch, m); err != nil {
+		connectionManager.DoReconnect(m)
 		GetLogger().Errorf("error producing m: %v", err)
 		GetRetryQueue().Push(m)
 		return
