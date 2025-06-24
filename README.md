@@ -45,7 +45,7 @@ queue:
 ## 构建
 
 ```bash
-go build -o bin/amqp-agent ./src
+go build -o ./amqp-agent ./src
 ```
 
 ## 运行
